@@ -1,0 +1,262 @@
+{
+  "name": "Email Processing and Distribution Flow",
+  "description": "Processes emails from E-Service shared mailbox and distributes them to specific users based on content analysis",
+  "trigger": {
+    "type": "When a new email arrives (V3)",
+    "mailbox": "e-service@quillarrowlaw.com",
+    "folderPath": "Inbox",
+    "onlyWithAttachments": false,
+    "includeAttachments": true
+  },
+  "variables": [
+    {
+      "name": "targetUser",
+      "type": "String",
+      "value": ""
+    },
+    {
+      "name": "targetFolder",
+      "type": "String", 
+      "value": ""
+    },
+    {
+      "name": "accessToken",
+      "type": "String",
+      "value": ""
+    }
+  ],
+  "actions": [
+    {
+      "name": "Get Access Token",
+      "type": "HTTP",
+      "method": "POST",
+      "uri": "https://login.microsoftonline.com/{tenant-id}/oauth2/v2.0/token",
+      "headers": {
+        "Content-Type": "application/x-www-form-urlencoded"
+      },
+      "body": "client_id={client-id}&client_secret={client-secret}&scope=https://graph.microsoft.com/.default&grant_type=client_credentials",
+      "note": "Alternative: Use Managed Identity authentication for better security"
+    },
+    {
+      "name": "Set Access Token Variable", 
+      "type": "Set variable",
+      "variable": "accessToken",
+      "value": "@{outputs('Get_Access_Token')?['body']?['access_token']}"
+    },
+    {
+      "name": "Determine Target User",
+      "type": "Switch",
+      "expression": "@triggerOutputs()?['body/subject']",
+      "cases": [
+        {
+          "case": "Contains 'Legal'",
+          "condition": "contains(triggerOutputs()?['body/subject'], 'Legal')",
+          "actions": [
+            {
+              "name": "Set Legal User",
+              "type": "Set variable", 
+              "variable": "targetUser",
+              "value": "lldistro@quillarrowlaw.com"
+            },
+            {
+              "name": "Set Legal Folder",
+              "type": "Set variable",
+              "variable": "targetFolder", 
+              "value": "Legal Cases"
+            }
+          ]
+        },
+        {
+          "case": "Contains 'Contract'",
+          "condition": "contains(triggerOutputs()?['body/subject'], 'Contract')",
+          "actions": [
+            {
+              "name": "Set Contract User",
+              "type": "Set variable",
+              "variable": "targetUser", 
+              "value": "tdolan@quillarrowlaw.com"
+            },
+            {
+              "name": "Set Contract Folder",
+              "type": "Set variable",
+              "variable": "targetFolder",
+              "value": "Contracts"
+            }
+          ]
+        }
+      ],
+      "default": {
+        "actions": [
+          {
+            "name": "Set Default User",
+            "type": "Set variable",
+            "variable": "targetUser",
+            "value": "admin@quillarrowlaw.com"
+          },
+          {
+            "name": "Set Default Folder", 
+            "type": "Set variable",
+            "variable": "targetFolder",
+            "value": "inbox"
+          }
+        ]
+      }
+    },
+    {
+      "name": "Get Original Message Details",
+      "type": "HTTP",
+      "method": "GET",
+      "uri": "https://graph.microsoft.com/v1.0/users/e-service@quillarrowlaw.com/messages/@{triggerOutputs()?['body/id']}",
+      "headers": {
+        "Authorization": "Bearer @{variables('accessToken')}",
+        "Content-Type": "application/json"
+      }
+    },
+    {
+      "name": "Get Message Attachments",
+      "type": "HTTP", 
+      "method": "GET",
+      "uri": "https://graph.microsoft.com/v1.0/users/e-service@quillarrowlaw.com/messages/@{triggerOutputs()?['body/id']}/attachments",
+      "headers": {
+        "Authorization": "Bearer @{variables('accessToken')}",
+        "Content-Type": "application/json"
+      }
+    },
+    {
+      "name": "Get Target User Folders",
+      "type": "HTTP",
+      "method": "GET", 
+      "uri": "https://graph.microsoft.com/v1.0/users/@{variables('targetUser')}/mailFolders",
+      "headers": {
+        "Authorization": "Bearer @{variables('accessToken')}",
+        "Content-Type": "application/json"
+      }
+    },
+    {
+      "name": "Find Target Folder ID",
+      "type": "Apply to each",
+      "foreach": "@outputs('Get_Target_User_Folders')?['body']?['value']",
+      "actions": [
+        {
+          "name": "Check Folder Name",
+          "type": "Condition",
+          "expression": "@equals(items('Find_Target_Folder_ID')?['displayName'], variables('targetFolder'))",
+          "if": {
+            "actions": [
+              {
+                "name": "Set Target Folder ID",
+                "type": "Set variable",
+                "variable": "targetFolder",
+                "value": "@{items('Find_Target_Folder_ID')?['id']}"
+              }
+            ]
+          }
+        }
+      ]
+    },
+    {
+      "name": "Create Message in Target Mailbox",
+      "type": "HTTP",
+      "method": "POST",
+      "uri": "https://graph.microsoft.com/v1.0/users/@{variables('targetUser')}/messages",
+      "headers": {
+        "Authorization": "Bearer @{variables('accessToken')}",
+        "Content-Type": "application/json"
+      },
+      "body": {
+        "subject": "@{outputs('Get_Original_Message_Details')?['body']?['subject']}",
+        "body": {
+          "contentType": "@{outputs('Get_Original_Message_Details')?['body']?['body']?['contentType']}",
+          "content": "@{outputs('Get_Original_Message_Details')?['body']?['body']?['content']}"
+        },
+        "toRecipients": [
+          {
+            "emailAddress": {
+              "address": "@{variables('targetUser')}"
+            }
+          }
+        ],
+        "from": {
+          "emailAddress": {
+            "address": "e-service@quillarrowlaw.com",
+            "name": "E-Service Mailbox"
+          }
+        },
+        "isDraft": false,
+        "importance": "@{outputs('Get_Original_Message_Details')?['body']?['importance']}",
+        "isRead": false
+      }
+    },
+    {
+      "name": "Add Attachments to New Message",
+      "type": "Apply to each",
+      "foreach": "@outputs('Get_Message_Attachments')?['body']?['value']",
+      "actions": [
+        {
+          "name": "Add Attachment",
+          "type": "HTTP",
+          "method": "POST", 
+          "uri": "https://graph.microsoft.com/v1.0/users/@{variables('targetUser')}/messages/@{outputs('Create_Message_in_Target_Mailbox')?['body']?['id']}/attachments",
+          "headers": {
+            "Authorization": "Bearer @{variables('accessToken')}",
+            "Content-Type": "application/json"
+          },
+          "body": {
+            "@odata.type": "#microsoft.graph.fileAttachment",
+            "name": "@{items('Add_Attachments_to_New_Message')?['name']}",
+            "contentBytes": "@{items('Add_Attachments_to_New_Message')?['contentBytes']}"
+          }
+        }
+      ]
+    },
+    {
+      "name": "Move Message to Target Folder",
+      "type": "HTTP",
+      "method": "POST",
+      "uri": "https://graph.microsoft.com/v1.0/users/@{variables('targetUser')}/messages/@{outputs('Create_Message_in_Target_Mailbox')?['body']?['id']}/move",
+      "headers": {
+        "Authorization": "Bearer @{variables('accessToken')}",
+        "Content-Type": "application/json"
+      },
+      "body": {
+        "destinationId": "@{variables('targetFolder')}"
+      }
+    },
+    {
+      "name": "Mark Original Message as Processed",
+      "type": "HTTP",
+      "method": "PATCH",
+      "uri": "https://graph.microsoft.com/v1.0/users/e-service@quillarrowlaw.com/messages/@{triggerOutputs()?['body/id']}",
+      "headers": {
+        "Authorization": "Bearer @{variables('accessToken')}",
+        "Content-Type": "application/json"
+      },
+      "body": {
+        "isRead": true,
+        "categories": ["Processed"]
+      }
+    },
+    {
+      "name": "Send Notification",
+      "type": "Send an email (V2)",
+      "to": "@{variables('targetUser')}",
+      "subject": "New Email Assigned: @{outputs('Get_Original_Message_Details')?['body']?['subject']}",
+      "body": "A new email has been automatically assigned to you and moved to your @{variables('targetFolder')} folder.\n\nOriginal sender: @{outputs('Get_Original_Message_Details')?['body']?['from']?['emailAddress']?['address']}\nSubject: @{outputs('Get_Original_Message_Details')?['body']?['subject']}\nReceived: @{outputs('Get_Original_Message_Details')?['body']?['receivedDateTime']}"
+    }
+  ],
+  "errorHandling": {
+    "scope": "Configure run after",
+    "actions": [
+      {
+        "name": "Send Error Notification",
+        "type": "Send an email (V2)",
+        "runAfter": {
+          "failed": true
+        },
+        "to": "admin@quillarrowlaw.com",
+        "subject": "Email Processing Flow Error",
+        "body": "An error occurred while processing email from E-Service mailbox.\n\nError: @{workflow()?['error']?['message']}\nEmail ID: @{triggerOutputs()?['body/id']}\nTime: @{utcNow()}"
+      }
+    ]
+  }
+}
